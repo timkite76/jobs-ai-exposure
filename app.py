@@ -9,10 +9,14 @@ Handbook. Original project by Andrej Karpathy: https://github.com/mariodian/jobs
 import json
 import pathlib
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.cluster import KMeans
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
 
 # ── Page config ──────────────────────────────────────────────────────────
 
@@ -49,6 +53,20 @@ def load_data() -> pd.DataFrame:
         8: "Very High (8-10)", 9: "Very High (8-10)", 10: "Very High (8-10)",
     }
     df["tier"] = df["exposure"].map(tier_map)
+    # Wages at risk per occupation
+    df["wages_at_risk"] = df["jobs"].fillna(0) * df["pay"].fillna(0)
+    # Education years estimate for ROI analysis
+    edu_years = {
+        "No formal educational credential": 0,
+        "High school diploma or equivalent": 0,
+        "Postsecondary nondegree award": 1,
+        "Some college, no degree": 2,
+        "Associate's degree": 2,
+        "Bachelor's degree": 4,
+        "Master's degree": 6,
+        "Doctoral or professional degree": 8,
+    }
+    df["edu_years"] = df["education"].map(edu_years)
     return df
 
 
@@ -180,7 +198,9 @@ with st.sidebar:
 
 view = st.radio(
     "View",
-    ["Treemap", "Exposure vs Outlook", "Data Table"],
+    ["Treemap", "Exposure vs Outlook", "Wages at Risk",
+     "Education ROI", "Growth Paradox", "Category Heatmap",
+     "Pay vs Safety", "Exposure Clusters", "Data Table"],
     horizontal=True,
     label_visibility="collapsed",
 )
@@ -268,6 +288,80 @@ if view == "Treemap":
 
     st.plotly_chart(fig, use_container_width=True)
 
+# ── Wages at Risk ────────────────────────────────────────────────────────
+
+elif view == "Wages at Risk":
+    st.subheader("Estimated Annual Wages at Risk by AI Exposure")
+    st.caption(
+        "Jobs x Median Pay = total wage dollars flowing through each occupation. "
+        "Grouped by exposure tier to show where the economic impact concentrates."
+    )
+
+    war_df = filtered.dropna(subset=["pay"]).copy()
+    war_df["wage_bill"] = war_df["jobs"] * war_df["pay"]
+
+    # By tier
+    tier_order_war = ["Minimal (0-1)", "Low (2-3)", "Moderate (4-5)", "High (6-7)", "Very High (8-10)"]
+    tier_wages = war_df.groupby("tier")["wage_bill"].sum().reindex(tier_order_war, fill_value=0).reset_index()
+    tier_wages.columns = ["Tier", "Total Wages"]
+    tier_wages["color"] = [exposure_color(x) for x in [0.5, 2.5, 4.5, 6.5, 9.0]]
+
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        fig_tw = go.Figure(go.Bar(
+            x=tier_wages["Tier"], y=tier_wages["Total Wages"],
+            marker_color=tier_wages["color"],
+            hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>",
+        ))
+        fig_tw.update_layout(
+            height=400, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+            font=dict(color="#e0e0e8"),
+            yaxis=dict(title="Annual Wages ($)", gridcolor="rgba(255,255,255,0.06)"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+            margin=dict(t=10, b=40),
+        )
+        st.plotly_chart(fig_tw, use_container_width=True)
+
+    with col_w2:
+        # By category
+        cat_wages = (
+            war_df.groupby("category_display")
+            .agg(wage_bill=("wage_bill", "sum"), avg_exp=("exposure", "mean"))
+            .sort_values("wage_bill", ascending=True)
+            .tail(15)
+        )
+        fig_cw = go.Figure(go.Bar(
+            y=cat_wages.index, x=cat_wages["wage_bill"], orientation="h",
+            marker_color=cat_wages["avg_exp"].apply(exposure_color),
+            hovertemplate="<b>%{y}</b><br>$%{x:,.0f}<extra></extra>",
+        ))
+        fig_cw.update_layout(
+            title="Top 15 Categories by Wage Bill", height=400,
+            paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+            font=dict(color="#e0e0e8", size=10),
+            xaxis=dict(title="Annual Wages ($)", gridcolor="rgba(255,255,255,0.06)"),
+            margin=dict(t=30, l=180, b=40),
+        )
+        st.plotly_chart(fig_cw, use_container_width=True)
+
+    # Top individual occupations by wages at risk (exposure >= 7)
+    st.subheader("Largest Wage Concentrations in High-Exposure Jobs (7+)")
+    top_war = war_df[war_df["exposure"] >= 7].nlargest(20, "wage_bill")
+    fig_top = go.Figure(go.Bar(
+        y=top_war["title"].values[::-1], x=top_war["wage_bill"].values[::-1],
+        orientation="h",
+        marker_color=[exposure_color(e) for e in top_war["exposure"].values[::-1]],
+        customdata=np.column_stack([top_war["exposure"].values[::-1], top_war["pay"].values[::-1], top_war["jobs"].values[::-1]]),
+        hovertemplate="<b>%{y}</b><br>Wages: $%{x:,.0f}<br>Exposure: %{customdata[0]}/10<br>Pay: $%{customdata[1]:,.0f}<br>Jobs: %{customdata[2]:,.0f}<extra></extra>",
+    ))
+    fig_top.update_layout(
+        height=500, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8", size=10),
+        xaxis=dict(title="Annual Wage Bill ($)", gridcolor="rgba(255,255,255,0.06)"),
+        margin=dict(t=10, l=250, b=40),
+    )
+    st.plotly_chart(fig_top, use_container_width=True)
+
 # ── Scatter: Exposure vs Outlook ─────────────────────────────────────────
 
 elif view == "Exposure vs Outlook":
@@ -333,6 +427,298 @@ elif view == "Exposure vs Outlook":
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+# ── Education ROI ────────────────────────────────────────────────────────
+
+elif view == "Education ROI":
+    st.subheader("Education ROI Under AI Pressure")
+    st.caption(
+        "Are expensive degrees leading people into the most exposed careers? "
+        "Each bubble is one occupation. X = education investment, Y = AI exposure, size = employment."
+    )
+
+    roi_df = filtered.dropna(subset=["edu_years", "pay"]).copy()
+    roi_df["jobs_scaled"] = roi_df["jobs"].clip(lower=100)
+
+    fig_roi = px.scatter(
+        roi_df, x="edu_years", y="exposure", size="jobs_scaled",
+        color="pay", color_continuous_scale="Viridis",
+        hover_name="title",
+        hover_data={"edu_years": False, "exposure": True, "pay": ":$,.0f",
+                    "jobs": ":,.0f", "education": True, "jobs_scaled": False},
+        labels={"edu_years": "Education (years beyond HS)", "exposure": "AI Exposure (0-10)",
+                "pay": "Median Pay"},
+        size_max=40,
+    )
+    fig_roi.update_layout(
+        height=600, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", dtick=1,
+                   ticktext=["HS/None", "1yr cert", "Associate's", "", "Bachelor's", "", "Master's", "", "Doctoral"],
+                   tickvals=[0, 1, 2, 3, 4, 5, 6, 7, 8]),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+    )
+    st.plotly_chart(fig_roi, use_container_width=True)
+
+    # Summary table: avg exposure and pay by education level
+    st.subheader("Average Exposure & Pay by Education Level")
+    edu_summary = (
+        roi_df.groupby("education")
+        .apply(lambda g: pd.Series({
+            "Avg Exposure": np.average(g["exposure"], weights=g["jobs"]),
+            "Avg Pay": np.average(g["pay"], weights=g["jobs"]),
+            "Total Jobs": g["jobs"].sum(),
+        }))
+        .sort_values("Avg Exposure", ascending=False)
+    )
+    edu_summary["Avg Pay"] = edu_summary["Avg Pay"].apply(lambda x: f"${x:,.0f}")
+    edu_summary["Total Jobs"] = edu_summary["Total Jobs"].apply(lambda x: f"{x:,.0f}")
+    edu_summary["Avg Exposure"] = edu_summary["Avg Exposure"].apply(lambda x: f"{x:.1f}")
+    st.dataframe(edu_summary, use_container_width=True)
+
+# ── Growth Paradox ───────────────────────────────────────────────────────
+
+elif view == "Growth Paradox":
+    st.subheader("Growth Paradox: High Exposure + Strong BLS Growth")
+    st.caption(
+        "Occupations where BLS projects strong growth (5%+) but AI exposure is high (7+). "
+        "Either BLS underestimates AI disruption, or these roles will transform rather than disappear."
+    )
+
+    paradox_df = filtered.dropna(subset=["outlook"]).copy()
+    paradox_high = paradox_df[(paradox_df["exposure"] >= 7) & (paradox_df["outlook"] >= 5)]
+    paradox_high = paradox_high.sort_values("outlook", ascending=False)
+
+    if len(paradox_high) == 0:
+        st.info("No occupations match the current filters for this view.")
+    else:
+        fig_par = go.Figure()
+        fig_par.add_trace(go.Scatter(
+            x=paradox_df["exposure"], y=paradox_df["outlook"],
+            mode="markers",
+            marker=dict(size=6, color="rgba(255,255,255,0.15)"),
+            hoverinfo="skip", showlegend=False,
+        ))
+        fig_par.add_trace(go.Scatter(
+            x=paradox_high["exposure"], y=paradox_high["outlook"],
+            mode="markers+text",
+            marker=dict(
+                size=paradox_high["jobs"].clip(lower=1000).apply(lambda x: max(8, min(40, x / 100000))),
+                color=[exposure_color(e) for e in paradox_high["exposure"]],
+                line=dict(width=1, color="white"),
+            ),
+            text=paradox_high["title"].apply(lambda t: t[:25] + "..." if len(t) > 25 else t),
+            textposition="top center", textfont=dict(size=9, color="#e0e0e8"),
+            customdata=np.column_stack([paradox_high["pay"].fillna(0), paradox_high["jobs"], paradox_high["outlook"]]),
+            hovertemplate="<b>%{text}</b><br>Exposure: %{x}/10<br>Growth: %{customdata[2]}%<br>Pay: $%{customdata[0]:,.0f}<br>Jobs: %{customdata[1]:,.0f}<extra></extra>",
+            showlegend=False,
+        ))
+        # Highlight zone
+        fig_par.add_shape(type="rect", x0=7, x1=10.5, y0=5, y1=paradox_df["outlook"].max() * 1.1,
+                          fillcolor="rgba(255,100,100,0.05)", line=dict(color="rgba(255,100,100,0.3)", dash="dot"))
+        fig_par.add_annotation(x=8.5, y=paradox_df["outlook"].max() * 1.05,
+                               text="PARADOX ZONE", showarrow=False,
+                               font=dict(color="rgba(255,100,100,0.6)", size=14, family="monospace"))
+        fig_par.update_layout(
+            height=600, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+            font=dict(color="#e0e0e8"),
+            xaxis=dict(title="AI Exposure", gridcolor="rgba(255,255,255,0.06)", range=[0, 10.5]),
+            yaxis=dict(title="BLS Projected Growth (%)", gridcolor="rgba(255,255,255,0.06)"),
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig_par, use_container_width=True)
+
+        st.subheader(f"Paradox Occupations ({len(paradox_high)} found)")
+        para_table = paradox_high[["title", "exposure", "outlook", "outlook_desc", "pay", "jobs", "education"]].copy()
+        para_table.columns = ["Occupation", "Exposure", "Growth %", "Outlook", "Pay", "Jobs", "Education"]
+        para_table = para_table.sort_values("Growth %", ascending=False)
+        st.dataframe(para_table, use_container_width=True, column_config={
+            "Pay": st.column_config.NumberColumn(format="$%d"),
+            "Jobs": st.column_config.NumberColumn(format="%d"),
+        })
+
+# ── Category Heatmap ─────────────────────────────────────────────────────
+
+elif view == "Category Heatmap":
+    st.subheader("Category vs. Exposure Tier Heatmap")
+    st.caption("Cell color = total employment. Reveals which entire sectors are concentrated at high exposure.")
+
+    heat_df = filtered.copy()
+    tier_order_h = ["Minimal (0-1)", "Low (2-3)", "Moderate (4-5)", "High (6-7)", "Very High (8-10)"]
+    pivot = heat_df.pivot_table(index="category_display", columns="tier", values="jobs",
+                                aggfunc="sum", fill_value=0)
+    pivot = pivot.reindex(columns=tier_order_h, fill_value=0)
+    # Sort categories by total jobs descending
+    pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+
+    fig_heat = go.Figure(go.Heatmap(
+        z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
+        colorscale="YlOrRd", hovertemplate="<b>%{y}</b><br>%{x}<br>Jobs: %{z:,.0f}<extra></extra>",
+        colorbar=dict(title="Jobs"),
+    ))
+    fig_heat.update_layout(
+        height=max(500, len(pivot) * 24), paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8"),
+        yaxis=dict(autorange="reversed"),
+        margin=dict(t=10, l=200),
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # Weighted avg exposure per category
+    st.subheader("Weighted Average Exposure by Category")
+    cat_exp = (
+        heat_df.groupby("category_display")
+        .apply(lambda g: pd.Series({
+            "Weighted Exposure": np.average(g["exposure"], weights=g["jobs"]) if g["jobs"].sum() > 0 else 0,
+            "Total Jobs": g["jobs"].sum(),
+        }))
+        .sort_values("Weighted Exposure", ascending=True)
+    )
+    fig_ce = go.Figure(go.Bar(
+        y=cat_exp.index, x=cat_exp["Weighted Exposure"], orientation="h",
+        marker_color=[exposure_color(e) for e in cat_exp["Weighted Exposure"]],
+        customdata=cat_exp["Total Jobs"].values,
+        hovertemplate="<b>%{y}</b><br>Avg Exposure: %{x:.1f}<br>Jobs: %{customdata:,.0f}<extra></extra>",
+    ))
+    fig_ce.update_layout(
+        height=max(400, len(cat_exp) * 22), paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8", size=10),
+        xaxis=dict(title="Weighted Avg Exposure", gridcolor="rgba(255,255,255,0.06)", range=[0, 10]),
+        margin=dict(t=10, l=200, b=40),
+    )
+    st.plotly_chart(fig_ce, use_container_width=True)
+
+# ── Pay vs Safety ────────────────────────────────────────────────────────
+
+elif view == "Pay vs Safety":
+    st.subheader("The Safety Penalty: Do Low-Exposure Jobs Pay Less?")
+    st.caption("Pay distribution for each exposure tier. Is there a wage premium for AI-exposed work?")
+
+    pay_df = filtered.dropna(subset=["pay"]).copy()
+
+    fig_box = px.box(
+        pay_df, x="tier", y="pay", color="tier",
+        category_orders={"tier": ["Minimal (0-1)", "Low (2-3)", "Moderate (4-5)", "High (6-7)", "Very High (8-10)"]},
+        color_discrete_map={
+            "Minimal (0-1)": exposure_color(0.5), "Low (2-3)": exposure_color(2.5),
+            "Moderate (4-5)": exposure_color(4.5), "High (6-7)": exposure_color(6.5),
+            "Very High (8-10)": exposure_color(9),
+        },
+        hover_data={"title": True, "pay": ":$,.0f", "jobs": ":,.0f", "tier": False},
+        labels={"pay": "Median Annual Pay ($)", "tier": "Exposure Tier"},
+        points="all",
+    )
+    fig_box.update_layout(
+        height=500, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8"), showlegend=False,
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+        margin=dict(t=10),
+    )
+    st.plotly_chart(fig_box, use_container_width=True)
+
+    # Weighted median pay by tier
+    st.subheader("Weighted Average Pay by Tier")
+    tier_pay = (
+        pay_df.groupby("tier")
+        .apply(lambda g: pd.Series({
+            "Weighted Avg Pay": np.average(g["pay"], weights=g["jobs"]),
+            "Total Jobs": g["jobs"].sum(),
+            "Occupations": len(g),
+        }))
+        .reindex(["Minimal (0-1)", "Low (2-3)", "Moderate (4-5)", "High (6-7)", "Very High (8-10)"])
+    )
+    tier_pay["Weighted Avg Pay"] = tier_pay["Weighted Avg Pay"].apply(lambda x: f"${x:,.0f}")
+    tier_pay["Total Jobs"] = tier_pay["Total Jobs"].apply(lambda x: f"{x:,.0f}")
+    st.dataframe(tier_pay, use_container_width=True)
+
+    # Scatter: pay vs exposure with trend
+    st.subheader("Pay vs. Exposure (every occupation)")
+    fig_pv = px.scatter(
+        pay_df, x="exposure", y="pay", size=pay_df["jobs"].clip(lower=100),
+        color="exposure", color_continuous_scale=EXPOSURE_COLORSCALE, range_color=[0, 10],
+        hover_name="title", hover_data={"exposure": True, "pay": ":$,.0f", "jobs": ":,.0f"},
+        labels={"exposure": "AI Exposure", "pay": "Median Pay ($)"},
+        size_max=35, trendline="ols",
+    )
+    fig_pv.update_layout(
+        height=450, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+        margin=dict(t=10),
+    )
+    st.plotly_chart(fig_pv, use_container_width=True)
+
+# ── Exposure Clusters ────────────────────────────────────────────────────
+
+elif view == "Exposure Clusters":
+    st.subheader("Occupation Clusters by Exposure Rationale")
+    st.caption(
+        "TF-IDF on the LLM rationale text + KMeans clustering reveals *why* occupations are exposed — "
+        "grouping by shared themes (digital output, data processing, physical barriers, etc.) rather than BLS category."
+    )
+
+    cluster_df = filtered.dropna(subset=["exposure_rationale"]).copy()
+    n_clusters = st.slider("Number of clusters", 3, 12, 6)
+
+    @st.cache_data
+    def compute_clusters(rationales, n_clust):
+        tfidf = TfidfVectorizer(max_features=500, stop_words="english", ngram_range=(1, 2))
+        X = tfidf.fit_transform(rationales)
+        km = KMeans(n_clusters=n_clust, random_state=42, n_init=10)
+        labels = km.fit_predict(X)
+        pca = PCA(n_components=2, random_state=42)
+        coords = pca.fit_transform(X.toarray())
+        # Top terms per cluster
+        order_centroids = km.cluster_centers_.argsort()[:, ::-1]
+        terms = tfidf.get_feature_names_out()
+        top_terms = {}
+        for i in range(n_clust):
+            top_terms[i] = ", ".join(terms[ind] for ind in order_centroids[i, :5])
+        return labels, coords, top_terms
+
+    labels, coords, top_terms = compute_clusters(cluster_df["exposure_rationale"].tolist(), n_clusters)
+    cluster_df["cluster"] = labels
+    cluster_df["x"] = coords[:, 0]
+    cluster_df["y"] = coords[:, 1]
+    cluster_df["cluster_label"] = cluster_df["cluster"].map(
+        {i: f"C{i}: {top_terms[i]}" for i in range(n_clusters)}
+    )
+
+    fig_cl = px.scatter(
+        cluster_df, x="x", y="y", color="cluster_label",
+        hover_name="title",
+        hover_data={"exposure": True, "x": False, "y": False, "cluster_label": False,
+                    "pay": ":$,.0f", "jobs": ":,.0f"},
+        labels={"x": "PCA Component 1", "y": "PCA Component 2", "cluster_label": "Cluster"},
+        size=cluster_df["jobs"].clip(lower=100),
+        size_max=30,
+    )
+    fig_cl.update_layout(
+        height=600, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+        font=dict(color="#e0e0e8"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", showticklabels=False),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)", showticklabels=False),
+        legend=dict(font=dict(size=10)),
+        margin=dict(t=10),
+    )
+    st.plotly_chart(fig_cl, use_container_width=True)
+
+    # Cluster summary table
+    st.subheader("Cluster Profiles")
+    for i in sorted(cluster_df["cluster"].unique()):
+        c = cluster_df[cluster_df["cluster"] == i]
+        avg_exp = np.average(c["exposure"], weights=c["jobs"]) if c["jobs"].sum() > 0 else 0
+        with st.expander(f"Cluster {i}: {top_terms[i]}  |  {len(c)} occupations  |  Avg exposure: {avg_exp:.1f}"):
+            st.write(f"**Top keywords:** {top_terms[i]}")
+            st.write(f"**Total jobs:** {c['jobs'].sum():,.0f}")
+            examples = c.nlargest(5, "jobs")[["title", "exposure", "pay", "jobs"]].copy()
+            examples.columns = ["Occupation", "Exposure", "Pay", "Jobs"]
+            st.dataframe(examples, use_container_width=True, column_config={
+                "Pay": st.column_config.NumberColumn(format="$%d"),
+                "Jobs": st.column_config.NumberColumn(format="%d"),
+            })
 
 # ── Data Table View ──────────────────────────────────────────────────────
 
