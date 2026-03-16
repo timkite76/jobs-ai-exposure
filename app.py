@@ -72,6 +72,31 @@ def load_data() -> pd.DataFrame:
 
 df = load_data()
 
+# ── Load external data (optional files from fetch_external_data.py) ──────
+
+BLS_PATH = pathlib.Path(__file__).parent / "bls_trends.json"
+ONET_PATH = pathlib.Path(__file__).parent / "onet_skills.json"
+
+
+@st.cache_data
+def load_bls_trends():
+    if BLS_PATH.exists():
+        with open(BLS_PATH) as f:
+            return json.load(f)
+    return None
+
+
+@st.cache_data
+def load_onet_skills():
+    if ONET_PATH.exists():
+        with open(ONET_PATH) as f:
+            return json.load(f)
+    return None
+
+
+bls_trends = load_bls_trends()
+onet_skills = load_onet_skills()
+
 # ── Color scale (matches original green→red) ────────────────────────────
 
 
@@ -196,11 +221,19 @@ with st.sidebar:
 
 # ── Main area ────────────────────────────────────────────────────────────
 
+available_views = [
+    "Treemap", "Exposure vs Outlook", "Wages at Risk",
+    "Education ROI", "Growth Paradox", "Category Heatmap",
+    "Pay vs Safety", "Exposure Clusters",
+]
+if bls_trends:
+    available_views.append("Industry Trends")
+if onet_skills:
+    available_views.append("Skills Gap")
+available_views.append("Data Table")
+
 view = st.radio(
-    "View",
-    ["Treemap", "Exposure vs Outlook", "Wages at Risk",
-     "Education ROI", "Growth Paradox", "Category Heatmap",
-     "Pay vs Safety", "Exposure Clusters", "Data Table"],
+    "View", available_views,
     horizontal=True,
     label_visibility="collapsed",
 )
@@ -719,6 +752,192 @@ elif view == "Exposure Clusters":
                 "Pay": st.column_config.NumberColumn(format="$%d"),
                 "Jobs": st.column_config.NumberColumn(format="%d"),
             })
+
+# ── Industry Trends ──────────────────────────────────────────────────────
+
+elif view == "Industry Trends" and bls_trends:
+    st.subheader("Historical Employment Trends by Industry (2015-2024)")
+    st.caption(
+        "Monthly employment data from BLS Current Employment Statistics. "
+        "Shows which industries backing high-exposure occupations are already shifting. "
+        "Each line = thousands of employees."
+    )
+
+    series = bls_trends["series"]
+    cat_map = bls_trends["category_mapping"]
+
+    # Let user pick series to display
+    series_names = {sid: info["name"] for sid, info in series.items()}
+    default_series = ["CES5000000001", "CES6054000001", "CES6000000001",
+                      "CES6500000001", "CES2000000001", "CES3000000001"]
+    default_series = [s for s in default_series if s in series_names]
+
+    selected_series = st.multiselect(
+        "Select industries",
+        options=list(series_names.keys()),
+        default=default_series,
+        format_func=lambda x: series_names[x],
+    )
+
+    if selected_series:
+        fig_trend = go.Figure()
+        for sid in selected_series:
+            info = series[sid]
+            dates = [f"{p['year']}-{p['month']:02d}-01" for p in info["data"]]
+            values = [p["value"] for p in info["data"]]
+            fig_trend.add_trace(go.Scatter(
+                x=dates, y=values, mode="lines", name=info["name"],
+                hovertemplate=f"<b>{info['name']}</b><br>" + "%{x}<br>%{y:,.0f}K employees<extra></extra>",
+            ))
+
+        fig_trend.update_layout(
+            height=500, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+            font=dict(color="#e0e0e8"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.06)", title=""),
+            yaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="Employment (thousands)"),
+            legend=dict(font=dict(size=10)),
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+        # Indexed view (% change from 2015 baseline)
+        st.subheader("Indexed Growth (Jan 2015 = 100)")
+        st.caption("Normalizes all industries to the same starting point to compare growth rates.")
+        fig_idx = go.Figure()
+        for sid in selected_series:
+            info = series[sid]
+            dates = [f"{p['year']}-{p['month']:02d}-01" for p in info["data"]]
+            values = [p["value"] for p in info["data"]]
+            baseline = values[0] if values[0] > 0 else 1
+            indexed = [v / baseline * 100 for v in values]
+            fig_idx.add_trace(go.Scatter(
+                x=dates, y=indexed, mode="lines", name=info["name"],
+                hovertemplate=f"<b>{info['name']}</b><br>" + "%{x}<br>Index: %{y:.1f}<extra></extra>",
+            ))
+
+        fig_idx.add_hline(y=100, line_dash="dot", line_color="rgba(255,255,255,0.3)")
+        fig_idx.update_layout(
+            height=450, paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+            font=dict(color="#e0e0e8"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+            yaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="Index (Jan 2015 = 100)"),
+            legend=dict(font=dict(size=10)),
+            margin=dict(t=10),
+        )
+        st.plotly_chart(fig_idx, use_container_width=True)
+    else:
+        st.info("Select at least one industry to view trends.")
+
+    # Category-to-industry mapping insight
+    st.subheader("How Occupation Categories Map to Industries")
+    st.caption("Each BLS occupation category is associated with one or more industries.")
+    mapping_rows = []
+    for cat, sids in cat_map.items():
+        cat_display = cat.replace("-", " ").replace("and ", "& ").title()
+        industry_names = [series_names.get(s, s) for s in sids if s in series_names]
+        # Get avg exposure for this category
+        cat_data = filtered[filtered["category"] == cat]
+        avg_exp = np.average(cat_data["exposure"], weights=cat_data["jobs"]) if len(cat_data) > 0 and cat_data["jobs"].sum() > 0 else 0
+        mapping_rows.append({
+            "Category": cat_display,
+            "Mapped Industries": ", ".join(industry_names),
+            "Avg Exposure": round(avg_exp, 1),
+            "Occupations": len(cat_data),
+        })
+    mapping_df = pd.DataFrame(mapping_rows).sort_values("Avg Exposure", ascending=False)
+    st.dataframe(mapping_df, use_container_width=True)
+
+# ── Skills Gap (O*NET) ──────────────────────────────────────────────────
+
+elif view == "Skills Gap" and onet_skills:
+    st.subheader("Skills Gap Analysis: High vs Low Exposure Occupations")
+    st.caption(
+        "O*NET skill requirements compared between high-exposure (7+) and low-exposure (0-3) occupations. "
+        "Shows which skills are valued in AI-safe jobs for potential retraining paths."
+    )
+
+    # Load occupations.csv for SOC codes
+    csv_path = pathlib.Path(__file__).parent / "occupations.csv"
+    if csv_path.exists():
+        import csv as csv_mod
+        with open(csv_path) as f:
+            reader = csv_mod.DictReader(f)
+            occ_rows = list(reader)
+        soc_lookup = {r["slug"]: r.get("soc_code", "").strip() for r in occ_rows}
+
+        # Build skill profiles for high vs low exposure
+        high_skills = {}
+        low_skills = {}
+        high_count = 0
+        low_count = 0
+
+        for _, row in filtered.iterrows():
+            soc = soc_lookup.get(row["slug"], "")
+            if soc not in onet_skills:
+                continue
+            skills = onet_skills[soc]["skills"]
+            target = None
+            if row["exposure"] >= 7:
+                target = high_skills
+                high_count += 1
+            elif row["exposure"] <= 3:
+                target = low_skills
+                low_count += 1
+            if target is not None:
+                for s in skills:
+                    name = s["name"]
+                    if name not in target:
+                        target[name] = []
+                    target[name].append(s["score"])
+
+        if high_skills and low_skills:
+            # Average scores
+            all_skill_names = sorted(set(high_skills.keys()) | set(low_skills.keys()))
+            comparison = []
+            for name in all_skill_names:
+                h_avg = np.mean(high_skills[name]) if name in high_skills else 0
+                l_avg = np.mean(low_skills[name]) if name in low_skills else 0
+                comparison.append({
+                    "Skill": name,
+                    "High Exposure Avg": round(h_avg, 2),
+                    "Low Exposure Avg": round(l_avg, 2),
+                    "Difference": round(h_avg - l_avg, 2),
+                })
+            comp_df = pd.DataFrame(comparison).sort_values("Difference", ascending=False)
+
+            # Diverging bar chart
+            fig_skills = go.Figure()
+            fig_skills.add_trace(go.Bar(
+                y=comp_df["Skill"], x=comp_df["High Exposure Avg"],
+                name=f"High Exposure (n={high_count})", orientation="h",
+                marker_color=exposure_color(8),
+            ))
+            fig_skills.add_trace(go.Bar(
+                y=comp_df["Skill"], x=comp_df["Low Exposure Avg"],
+                name=f"Low Exposure (n={low_count})", orientation="h",
+                marker_color=exposure_color(2),
+            ))
+            fig_skills.update_layout(
+                barmode="group", height=max(400, len(comp_df) * 25),
+                paper_bgcolor="#0a0a0f", plot_bgcolor="#0a0a0f",
+                font=dict(color="#e0e0e8", size=10),
+                xaxis=dict(title="Average Skill Importance", gridcolor="rgba(255,255,255,0.06)"),
+                margin=dict(t=10, l=200),
+                legend=dict(font=dict(size=11)),
+            )
+            st.plotly_chart(fig_skills, use_container_width=True)
+
+            st.subheader("Skills Most Differentiating Low-Exposure (Safer) Jobs")
+            safe_skills = comp_df[comp_df["Difference"] < 0].sort_values("Difference").head(10)
+            st.dataframe(safe_skills, use_container_width=True)
+
+            st.subheader("Skills Most Concentrated in High-Exposure Jobs")
+            risky_skills = comp_df[comp_df["Difference"] > 0].sort_values("Difference", ascending=False).head(10)
+            st.dataframe(risky_skills, use_container_width=True)
+        else:
+            st.info(f"Not enough O*NET data matched. High: {high_count}, Low: {low_count}")
+    else:
+        st.warning("occupations.csv not found — needed for SOC code mapping.")
 
 # ── Data Table View ──────────────────────────────────────────────────────
 
