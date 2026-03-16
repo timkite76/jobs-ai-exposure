@@ -440,3 +440,111 @@ with col2:
         margin=dict(t=10, l=200, b=40),
     )
     st.plotly_chart(fig_bar, use_container_width=True)
+
+# ── Methodology ──────────────────────────────────────────────────────────
+
+st.divider()
+
+with st.expander("Methodology: Scoring Algorithm & Heuristics", expanded=False):
+    st.markdown("""
+### Data Pipeline
+
+This analysis follows a five-stage pipeline built on top of the **Bureau of Labor Statistics
+[Occupational Outlook Handbook](https://www.bls.gov/ooh/)** (OOH), which covers **342 occupations**
+spanning every sector of the US economy.
+
+| Stage | Description |
+|-------|-------------|
+| **1. Scrape** | Playwright downloads the raw HTML for all 342 BLS occupation pages (job duties, work environment, education, pay, projections). |
+| **2. Parse** | BeautifulSoup converts raw HTML into clean Markdown, preserving the structured detail of each occupation profile. |
+| **3. Tabulate** | Structured fields are extracted into a flat table: median pay, entry education, job count, growth outlook, and SOC code. |
+| **4. Score** | Each occupation's full Markdown description is sent to an LLM (Gemini Flash via OpenRouter) with a calibrated scoring rubric. The model returns a 0-10 exposure score and a written rationale. |
+| **5. Merge** | CSV statistics and AI exposure scores are combined into a single dataset for visualization. |
+
+---
+
+### AI Exposure Scoring Rubric
+
+Each occupation is scored on a single **AI Exposure** axis from **0 to 10**, measuring *how much
+AI will reshape that occupation*. The score captures two dimensions:
+
+- **Direct automation** — AI performing tasks currently done by humans (e.g., code generation,
+  document drafting, data entry)
+- **Indirect productivity effects** — AI making each worker so productive that fewer are needed
+  (e.g., one analyst doing the work of five with AI tools)
+
+#### Primary Heuristic: Digital vs. Physical Work
+
+The single strongest signal in the rubric is whether the job's **work product is fundamentally
+digital**:
+
+- If the job can be done entirely from a home office on a computer — writing, coding, analyzing,
+  communicating — AI exposure is **inherently high (7+)**, because AI capabilities in digital
+  domains are advancing rapidly. Even if today's AI can't handle every aspect, the trajectory
+  is steep and the ceiling is very high.
+- Conversely, jobs requiring **physical presence, manual skill, or real-time human interaction**
+  in the physical world have a natural barrier to AI exposure.
+
+#### Calibration Anchors
+
+The LLM is given explicit calibration examples to ensure consistent scoring across all 342 occupations:
+
+| Score | Tier | Heuristic | Examples |
+|-------|------|-----------|----------|
+| **0-1** | Minimal | Almost entirely physical, hands-on work in unpredictable environments. AI has essentially no impact on daily work. | Roofers, landscapers, commercial divers |
+| **2-3** | Low | Mostly physical or interpersonal. AI helps with peripheral tasks (scheduling, paperwork) but doesn't touch the core job. | Electricians, plumbers, firefighters, dental hygienists |
+| **4-5** | Moderate | A mix of physical/interpersonal and knowledge work. AI meaningfully assists the information-processing parts, but a substantial share still requires human presence. | Registered nurses, police officers, veterinarians |
+| **6-7** | High | Predominantly knowledge work with some need for human judgment, relationships, or physical presence. AI tools are already useful and workers using AI may be substantially more productive. | Teachers, managers, accountants, journalists |
+| **8-9** | Very High | Almost entirely done on a computer. All core tasks — writing, coding, analyzing, designing — are in domains where AI is rapidly improving. The occupation faces major restructuring. | Software developers, graphic designers, translators, paralegals |
+| **10** | Maximum | Routine information processing, fully digital, no physical component. AI can already do most of it today. | Data entry clerks, telemarketers |
+
+#### LLM Scoring Process
+
+- **Model:** Google Gemini Flash (via OpenRouter API)
+- **Temperature:** 0.2 (low variance for consistent, deterministic scoring)
+- **Input:** The full Markdown profile of each occupation (duties, environment, education, pay, projections)
+- **Output:** A structured JSON with an integer `exposure` score (0-10) and a 2-3 sentence `rationale`
+- **Incremental checkpointing:** Results are saved after each occupation so the pipeline can resume if interrupted
+
+---
+
+### Visualization Algorithms
+
+**Treemap (Squarified Layout)**
+
+The treemap uses the **squarified treemap algorithm** (Bruls, Huizing & van Wijk, 2000), which
+optimizes rectangle aspect ratios to be as close to 1:1 as possible for readability:
+
+- Occupations are first grouped by BLS category
+- Category blocks are laid out proportional to their total employment
+- Within each category, individual occupations are laid out proportional to their job count
+- **Area** = number of jobs (2024 employment figures)
+- **Color** = AI exposure score on a green (safe) to red (exposed) continuous scale
+
+**Scatter Plot (Exposure vs. Outlook)**
+
+Maps each occupation on two axes to reveal which jobs face a "double threat":
+
+- **X-axis:** AI Exposure score (0-10)
+- **Y-axis:** BLS employment outlook (projected % change 2024-2034)
+- **Bubble size:** proportional to current employment
+- **Quadrant interpretation:** Upper-left = safe & growing; Lower-right = exposed & declining
+
+**Weighted Statistics**
+
+All aggregate statistics (average exposure, tier breakdowns, pay/education comparisons) are
+**job-weighted** — each occupation contributes proportionally to its employment count, so that
+an occupation with 4M workers has 1000x the influence of one with 4K workers. This prevents
+the 342 occupations from being treated as equally important when they vary by orders of magnitude
+in employment.
+
+---
+
+### Limitations
+
+- Scores reflect a single LLM's assessment at a point in time; different models or prompts may yield different scores
+- The BLS OOH groups some related occupations together, so granularity varies
+- Exposure scores measure *potential for AI impact*, not a timeline — a score of 8 doesn't mean 80% of jobs disappear tomorrow
+- The scoring rubric intentionally weights digital/physical nature heavily, which may underweight other factors like regulatory barriers or union protections
+""")
+
